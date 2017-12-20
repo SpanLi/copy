@@ -1,0 +1,796 @@
+-- =========================================================================================================================================================================================
+-- 校验
+select count(*) from risk.yuqi_fq_tmp_overdue_determine;
+select count(*) from risktmp.lxq_fq_tmp_overdue_determine1;
+
+select a.* from risk.yuqi_fq_tmp_overdue_determine a
+left join risktmp.lxq_fq_tmp_overdue_determine1 b
+on a.customer_sub_account_id=b.customer_sub_account_id
+where 
+a.txn_id<>b.txn_id or
+a.最后还款日<>b.最后还款日 or
+a.入催日期<>b.入催日期 or
+a.max_overdue<>left(b.max_overdue,1) or
+b.customer_sub_account_id is null
+;
+
+
+select * from aldb.t_cash_repay_plan where txn_id='4789286'; #customer_sub_account_id='20018951'; #
+select * from aldb.t_overdue_record where withdraw_cash_no='4789286'; #customer_sub_account_id='20018951'; #
+select * from aldb.t_overdue_detail where withdraw_cash_no='4789286';
+select * from risk.risk_daily_repayment where trade_id='4789286'; #account_id='20018951'; #
+select * from aldb.t_clearing_write_off where trade_id='4789286'; #account_id='20018951'; #
+select * from aldb.t_clearing_write_off_txn where trade_id='4789286'; #account_id=''; #
+select * from risk.fq_tmp_overdue_determine where txn_id='4789286'; #customer_sub_account_id='20018951'; #
+select * from risk.fq_fenan_tmp_coll_level_info where customer_sub_account_id='20018951';
+
+
+--消费金融
+由于新产品空中信付近期即将上线，相关表格的内容可能会有所调整，目前对于风控的相关表格 t_risk_evaluation 和 t_cash_withdraw_txn, t_cash_withdraw_apply, t_cash_repay_plan 主要确认的调整如下：
+1）event_type字段新增两个枚举值skyApplyCredit, skyLoan，分别代表空中授信申请、空中提现申请，
+2）product_code（product_id）字段新增枚举值8，表示空中网产品。
+
+-- 报表更新时间
+催收报表目前运行时间是这样：
+现金贷：6:00开始
+分期：7:00开始
+催收内部：7:40开始
+
+report_date overdue_date overdue_level  
+2017-09-18	2017-09-11	M1-1
+2017-09-18	2017-08-18	M1-2~4
+2017-09-18	2017-07-18	M2
+2017-09-18	2017-06-18	M3
+2017-09-18	2017-05-18	M4
+2017-09-18	2017-04-18	M5
+2017-09-18	2017-03-18	M6
+2017-09-18	2016-12-06	M6+
+
+
+-- 查看mysql后台进程
+select * from information_schema.innodb_trx
+show processlist;
+kill id;
+
+
+-- 索引
+show index from weekly_rc_market;
+show keys from tblname;
+-- 1.添加PRIMARY KEY（主键索引） 
+mysql>ALTER TABLE `table_name` ADD PRIMARY KEY ( `column` ) 
+-- 2.添加UNIQUE(唯一索引) 
+mysql>ALTER TABLE `table_name` ADD UNIQUE ( `column` ) 
+-- 3.添加INDEX(普通索引) 
+mysql>ALTER TABLE `table_name` ADD INDEX index_name ( `column` ) 
+-- 4.添加FULLTEXT(全文索引) 
+mysql>ALTER TABLE `table_name` ADD FULLTEXT ( `column`) 
+-- 5.添加多列索引 
+mysql>ALTER TABLE `table_name` ADD INDEX index_name ( `column1`, `column2`, `column3` )
+
+-- =========================================================================================================================================================================================
+-- 新进案件在M1-1阶段的回收
+-- vulture库表格tbl_urge_case里的iCreditGrade可对应颜色，1-灰色 2-黄色，只统计新进案件在M1-1阶段的回收
+-- 后续每月为自然月，即10月1日看到的是9月13日至9月30日数据累计；即10月20日看到的是10月1日至10月19日数据累计
+-- 你用risk.inside_tmp_coll_level_info_v2  这里面的overdue_date是逾期日，如果overdue_date=final_repayment_date+1，就是新增的案件，对应的overdue_date为新进的日期
+-- 一个客户号对应一个催收案件 tbl_urge_case里面的aCustNo就是客户号 统计每个员工的相关回收金额，当月新进入的案件在M1-1阶段的回收
+
+select DATE_FORMAT(curdate(),'%Y-%m-%d') as report_date,a.工号,a.姓名
+,sum(a.A黄色账户回收金额) as A黄色账户回收金额
+,sum(a.B灰色账户回收金额) as B灰色账户回收金额
+,sum(a.总回收金额)-sum(A黄色账户回收金额)-sum(B灰色账户回收金额) as 其他回收金额
+from
+(select v2.overdue_date as 日期
+,uglog.aCurrentUrgeMember as 工号
+,tu.aName as 姓名,ugcase.aCustNo
+,sum(case when iCreditGrade=2 then ifnull(rdr.write_off_amt,0) else 0 end) as A黄色账户回收金额
+,sum(case when iCreditGrade=1 then ifnull(rdr.write_off_amt,0) else 0 end) as B灰色账户回收金额
+,sum(ifnull(rdr.write_off_amt,0)) as 总回收金额
+from vulture.tbl_urge_caseallotlog uglog
+left join vulture.tbl_common_user tu on tu.aLoginId=uglog.aCurrentUrgeMember
+left join vulture.tbl_urge_case ugcase on ugcase.aCaseId=uglog.aCaseId
+left join risk.risk_daily_repayment rdr on ugcase.aCustNo=rdr.customer_id and rdr.balance_type='repayed'
+left join risk.inside_tmp_coll_level_info_v2 v2 on ugcase.aCustNo=v2.customer_id and uglog.dAssignBegDate=v2.overdue_date 	-- 比放where条件里效率更高
+and rdr.repayment_time BETWEEN DATE_FORMAT(DATE_add(v2.final_repayment_date, INTERVAL 1 DAY ),'%Y-%m-%d 00:00:00') and DATE_FORMAT(DATE_add(v2.final_repayment_date, INTERVAL 7 DAY ),'%Y-%m-%d 23:59:59')-- M1-1阶段回收
+where v2.overdue_date>=if(left(subdate(curdate(),1),7)='2017-09','2017-09-13',concat(left(subdate(curdate(),1),7),'-01')) 	-- 月初时间处理
+and v2.overdue_date<=DATE_FORMAT(subdate(curdate(),1),'%Y-%m-%d')
+and v2.overdue_level=11 and v2.overdue_date=date_add(v2.final_repayment_date,INTERVAL 1 day)
+and uglog.aAllotState=1 and uglog.aAssignType=2-- 永久分案
+and left(uglog.aCurrentUrgeMember,4)='CCA0' and tu.aName not in('外包账号测试','钱磊','周元培')
+group by uglog.aCurrentUrgeMember,ugcase.aCustNo,v2.overdue_date) a
+group by a.工号
+;
+
+-- =========================================================================================================================================================================================
+-- 本金回收
+--我的 #report_date 月份 到期本金 回收本金 本金回收率   月份就用最后还款日所在的月份吧
+delete from risktmp.lxq_report_test where `最后还款月`=  substr(DATE_FORMAT(NOW(),"%Y-%m-%d") ,1,7);
+insert into risktmp.lxq_report_test(report_date,最后还款月,到期本金)
+select
+DATE_FORMAT(now(),'%Y-%m-%d') as report_date
+,substr(DATE_FORMAT(crp.final_repayment_date,"%Y-%m-%d") ,1,7) as 最后还款月
+,sum(crp.principal_amt)  as 到期本金
+from  aldb.t_cash_repay_plan crp 
+left join aldb.company_test_users ctu on crp.customer_id=ctu.oid
+where crp.`status` in(20,22,25) AND ctu.oid is null 
+and crp.final_repayment_date between date_sub(date_sub(date_format(now(),'%y-%m-%d'),interval extract(day from now())-1 day),interval 0 month) and DATE_FORMAT(NOW(),'%Y-%m-%d 00:00:00')
+group by DATE_FORMAT(now(),'%Y-%m-%d'),substr(DATE_FORMAT(crp.final_repayment_date,"%Y-%m-%d") ,1,7)
+;
+
+truncate table risktmp.lxq_report_hs_test;
+insert into risktmp.lxq_report_hs_test(`最后还款月`,`回收本金`)
+select substr(DATE_FORMAT(crp.final_repayment_date,"%Y-%m-%d") ,1,7) as 最后还款月,ifnull(sum(rdr.write_off_amt),0) as 回收本金
+from  aldb.t_cash_repay_plan crp 
+left join aldb.company_test_users ctu on crp.customer_id=ctu.oid
+left join risk.risk_daily_repayment rdr ON crp.customer_sub_account_id =rdr.account_id and rdr.balance_type='principal'
+where crp.`status` in(20,22,25) AND ctu.oid is null 
+and crp.final_repayment_date< DATE_FORMAT(curdate(),'%Y-%m-%d 00:00:00')
+group by substr(DATE_FORMAT(crp.final_repayment_date,"%Y-%m-%d") ,1,7)
+;
+
+update risktmp.lxq_report_test a, risktmp.lxq_report_hs_test b set a.`回收本金`=b.`回收本金` where a.`最后还款月` = b.`最后还款月`;
+update risktmp.lxq_report_test a, risktmp.lxq_report_hs_test b set a.`本金回收率`=concat(round(b.`回收本金`*100 /a.`到期本金`,2),'%') where a.`最后还款月` = b.`最后还款月`;
+
+--他的
+BEGIN
+
+-- -- 全量生成
+-- delete from risk.principal_cycle_daily_report where report_date=DATE_FORMAT(curdate(),'%Y-%m-%d');
+-- insert into risk.principal_cycle_daily_report(report_date,
+-- 最后还款月,
+-- 到期本金,
+-- 回收本金,
+-- 本金回收率
+-- )
+-- select a.report_date,a.最后还款月,sum(a.到期本金) as 到期本金,sum(a.回收本金) as 回收本金
+-- ,concat(round(sum(a.回收本金)/sum(a.到期本金)*100,2),'%') as 本金回收率
+-- FROM
+-- (select
+-- DATE_FORMAT(curdate(),'%Y-%m-%d') as report_date
+-- ,left(crp.final_repayment_date,7) as 最后还款月
+-- ,crp.principal_amt as 到期本金
+-- ,ifnull(sum(rdr.write_off_amt),0) as 回收本金
+-- ,concat(round((sum(ifnull(rdr.write_off_amt,0)))*100 /( SUM(ifnull(crp.principal_amt,0)) ),2),'%') as 本金回收率
+-- from  aldb.t_cash_repay_plan crp 
+-- left join aldb.company_test_users ctu on crp.customer_id=ctu.oid
+-- left join risk.risk_daily_repayment rdr ON crp.customer_sub_account_id =rdr.account_id 
+-- and rdr.balance_type='principal' and rdr.repayment_time<DATE_FORMAT(curdate(),'%Y-%m-%d 00:00:00')
+-- where crp.`status` in(20,22,25) AND ctu.oid is null
+-- and crp.final_repayment_date< DATE_FORMAT(curdate(),'%Y-%m-%d 00:00:00')
+-- group by left(crp.final_repayment_date,7),crp.customer_sub_account_id
+-- ) a
+-- group by a.最后还款月
+-- ;
+
+delete from risk.principal_cycle_daily_report where report_date=DATE_FORMAT(curdate(),'%Y-%m-%d');
+insert into risk.principal_cycle_daily_report(report_date,
+最后还款月,
+到期本金,
+回收本金,
+本金回收率
+)
+select
+DATE_FORMAT(curdate(),'%Y-%m-%d') as report_date,
+最后还款月,
+到期本金,
+回收本金,
+本金回收率
+from risk.principal_cycle_daily_report where report_date=DATE_FORMAT(date_sub(curdate(),INTERVAL 1 day),'%Y-%m-%d')
+;
+
+
+-- 更新最近一月数据
+delete from risk.principal_cycle_daily_report where report_date=DATE_FORMAT(curdate(),'%Y-%m-%d') and 最后还款月=left(date_sub(curdate(),INTERVAL 1 day),7);
+insert into risk.principal_cycle_daily_report(report_date,
+最后还款月,
+到期本金,
+回收本金,
+本金回收率
+)
+select a.report_date,a.最后还款月,sum(a.到期本金) as 到期本金,sum(a.回收本金) as 回收本金
+,concat(round(sum(a.回收本金)/sum(a.到期本金)*100,2),'%') as 本金回收率
+FROM
+(
+	select
+	DATE_FORMAT(curdate(),'%Y-%m-%d') as report_date
+	,left(crp.final_repayment_date,7) as 最后还款月
+	,crp.principal_amt as 到期本金
+	,ifnull(sum(rdr.write_off_amt),0) as 回收本金
+	,concat(round((sum(ifnull(rdr.write_off_amt,0)))*100 /( SUM(ifnull(crp.principal_amt,0)) ),2),'%') as 本金回收率
+	from  aldb.t_cash_repay_plan crp 
+	left join aldb.company_test_users ctu on crp.customer_id=ctu.oid
+	left join risk.risk_daily_repayment rdr ON crp.customer_sub_account_id =rdr.account_id 
+	and rdr.balance_type='principal' and rdr.repayment_time<DATE_FORMAT(curdate(),'%Y-%m-%d 00:00:00')
+	where crp.`status` in(20,22,25) AND ctu.oid is null
+	and crp.final_repayment_date< DATE_FORMAT(curdate(),'%Y-%m-%d 00:00:00')
+	and crp.final_repayment_date>=concat(left(date_sub(curdate(),INTERVAL 1 day),7),'-01 00:00:00')
+	group by left(crp.final_repayment_date,7),crp.customer_sub_account_id
+) a
+group by a.最后还款月
+;
+
+
+-- 更新历史回收数据
+update risk.principal_cycle_daily_report a,
+(
+	select
+	DATE_FORMAT(curdate(),'%Y-%m-%d') as report_date
+	,left(crp.final_repayment_date,7) as 最后还款月
+	,sum(if(rdr.write_off_status=1 and rdr.repayment_time BETWEEN DATE_FORMAT(subdate(curdate(),1),'%Y-%m-%d 00:00:00') and DATE_FORMAT(subdate(curdate(),1),'%Y-%m-%d 23:59:59'),rdr.write_off_amt,0))
+	-sum(if(rdr.write_off_status>1,rdr.write_off_amt,0)) as 回收本金		--rdr.write_off_status=1 创建 >1 冲正（财务销账）
+	from  aldb.t_cash_repay_plan crp 
+	left join aldb.company_test_users ctu on crp.customer_id=ctu.oid
+	left join risk.risk_daily_repayment_update rdr on crp.customer_sub_account_id =rdr.account_id			--修改updated_at>=T-1天的记录
+	where crp.`status` in(20,22,25) AND ctu.oid is null and rdr.balance_type='principal' 
+	and crp.final_repayment_date<concat(left(curdate(),7),'-01 00:00:00')
+	group by left(crp.final_repayment_date,7)
+) b
+set a.回收本金=a.回收本金+b.回收本金,
+a.本金回收率=concat(round(a.回收本金*100/a.到期本金,2),'%')
+where a.report_date=DATE_FORMAT(curdate(),'%Y-%m-%d') and a.最后还款月=b.最后还款月
+;
+
+END
+
+
+-- =========================================================================================================================================================================================
+-- 案件查询
+-- 9月10号入催的各职场M1-2~4案件查询
+select a.overdue_date as 入催日期,a.overdue_level as 逾期状态,crp.customer_id as 客户ID,a.场地 as 职场
+,sum(a.overdue_principal) as 入催本金
+,sum(ifnull(rec_latefee,0)+ifnull(rec_overdue_fee,0)+ifnull(rec_principal,0)+ifnull(rec_service_fee,0)) as 回收总额
+from risk.fenan_tmp_coll_report_detail a
+left join aldb.t_cash_repay_plan crp on a.customer_sub_account_id=crp.customer_sub_account_id
+where overdue_level='M1-2~4' and overdue_date='2017-09-10' and 场地<>'未分案'
+group by crp.customer_id
+;
+
+-- 案件明细
+select DATE_FORMAT(date_sub(curdate(),interval 1 day),'%Y-%m-%d') as ovd_date,a.aCustNo as customer_id,a.场地 
+FROM
+(select 
+ugcase.aCustNo,
+case 
+when uglog.aAffilyDepartment='PuJ6n3C4zftb8Iy1Ivy9' or ((uglog.aAffilyDepartment='A0000' or uglog.aAffilyDepartment is null) and left(uglog.aCurrentUrgeMember,4)='CCA1') THEN 'HJ'
+when uglog.aAffilyDepartment='PyB6VZOWtZjhIeNuVa0b' or ((uglog.aAffilyDepartment='A0000' or uglog.aAffilyDepartment is null) and left(uglog.aCurrentUrgeMember,4)='CCA2') THEN 'TY' 
+when uglog.aAffilyDepartment='Q39o4NZb5rsWo22gGx3s' or ((uglog.aAffilyDepartment='A0000' or uglog.aAffilyDepartment is null) and left(uglog.aCurrentUrgeMember,4)='CCA3') THEN 'HD' 
+when uglog.aAffilyDepartment='Q5Vj65Kb5rrnaTc2g5D9' or ((uglog.aAffilyDepartment='A0000' or uglog.aAffilyDepartment is null) and left(uglog.aCurrentUrgeMember,4)='CCA4') THEN 'QW' 
+when uglog.aAffilyDepartment='QDGXeOJAPODNAJh07JK9' or ((uglog.aAffilyDepartment='A0000' or uglog.aAffilyDepartment is null) and left(uglog.aCurrentUrgeMember,4)='CCA5') THEN 'DZ' 
+when uglog.aAffilyDepartment='QNpU4mlbFmLYusKpj5ll' or ((uglog.aAffilyDepartment='A0000' or uglog.aAffilyDepartment is null) and left(uglog.aCurrentUrgeMember,4)='CCA6') THEN 'HT' 
+when uglog.aAffilyDepartment in('QTkFpXfAPOT3XJqPKBvd','QTkG5BeAPOeRGTSrwqAT') or ((uglog.aAffilyDepartment='A0000' or uglog.aAffilyDepartment is null) and left(uglog.aCurrentUrgeMember,4)='CCA7') THEN 'SZ' 
+else 'NZ' end as 场地,
+uglog.aAssignType
+from vulture.tbl_urge_case ugcase
+inner join vulture.tbl_urge_caseallotlog uglog  on ugcase.aCaseId=uglog.aCaseId
+where uglog.aAllotState=1  and DATE_FORMAT(DATE_SUB(curdate(), INTERVAL 1 DAY ),'%Y-%m-%d') >= uglog.dAssignBegDate 
+and DATE_FORMAT(DATE_SUB(curdate(), INTERVAL 1 DAY ),'%Y-%m-%d') < ifnull(uglog.dAssignEndDate,'2100-01-01')
+and ugcase.aProductId in (2,5)
+group by ugcase.aCustNo,uglog.aAssignType
+) a
+inner join
+(select 
+ugcase.aCustNo,
+DATE_FORMAT(curdate(),'%Y-%m-%d') as report_date,
+min(uglog.aAssignType) as aAssignType  #优先取临时分配，aAssignType=1临时分配，aAssignType=2永久分配
+from vulture.tbl_urge_case ugcase
+inner join vulture.tbl_urge_caseallotlog uglog  on ugcase.aCaseId=uglog.aCaseId
+where uglog.aAllotState=1  and DATE_FORMAT(DATE_SUB(curdate(), INTERVAL 1 DAY ),'%Y-%m-%d') >= uglog.dAssignBegDate 
+and DATE_FORMAT(DATE_SUB(curdate(), INTERVAL 1 DAY ),'%Y-%m-%d') < ifnull(uglog.dAssignEndDate,'2100-01-01')
+and ugcase.aProductId in (2,5)
+group by ugcase.aCustNo
+) b
+on a.aCustNo=b.aCustNo and a.aAssignType=b.aAssignType
+;
+
+
+
+-- =========================================================================================================================================================================================
+/*
+区分低接通率和高接通率，M1到M2是否会按接通率有正相关关系
+M1 三方接通率   
+逾期到M2的占比
+首次借款并逾期的
+接通率按等宽等高切分
+
+接通率	tbl_urge_diallog
+首次逾期	lcc_170830_android_customer		loan_time 最小
+aldb.t_cust_customer三方
+等宽切分（按数量）
+等高切分（按值）
+把M1阶段的三方接通率分别按等宽、等高切分，计算各等级的ovd_m2比例
+aldb.t_cust_customer  刚才这里有本人的手机号，跟这里的不一致就是三方
+*/
+
+-- 首次进入M1阶段的人  原 lcc_170830_android_customer
+select crp.customer_id,crp.txn_id,app.updated_at as apply_time,cwt.loan_time
+,if(left(mid(cwt.loan_time,12,2),1)=0,right(mid(cwt.loan_time,12,2),1),mid(cwt.loan_time,12,2)) as loan_period
+,datediff(cwt.loan_time,app.updated_at) as apply_loan_days,crp.final_repayment_date
+,crp.principal_amt,ifnull(app.credit_score,0) as credit_score,ifnull(app.credit_rating,0) as credit_rating
+,cwt.loan_time_limit,a.vari0002,a.vari0155,a.vari0156,a.vari0157,a.vari0158,a.vari0159
+,a.vari0362,a.vari0363,if(cwt.bank_card_id=cla.bank_card_id,1,0) as same_card
+,if(crp.magicoin_deduction_amt>0,1,0) as magic_flag
+,count(distinct prt.created_at) as pay_fail
+,if(max(if(tre.event_type='applyCredit' and app.risk_id=tre.oid,tre.client_type,null))=max(if(tre.event_type='loan' and cwa.risk_id=tre.oid,tre.client_type,null)),0,1) as change_os
+,if(ovr.risk_control_level>=20,1,if(ovr.risk_control_level>=12,1,0)) as ovd_m12
+,if(ovr.risk_control_level>=20,1,0) as ovd_m2
+from risk.customer_vars_android a
+left join aldb.t_cash_withdraw_txn cwt on a.customer_id=cwt.customer_id
+left join risk.risk_daily_temp_app app on a.customer_id=app.customer_id
+left join aldb.t_cash_repay_plan crp on cwt.oid=crp.txn_id
+left join aldb.t_overdue_record ovr on cwt.oid=ovr.withdraw_cash_no
+left join aldb.t_cash_withdraw_apply cwa on cwt.withdraw_apply_id = cwa.oid
+left join aldb.t_risk_evaluation tre on a.customer_id=tre.customer_id
+left join aldb.t_cash_loan_apply cla on app.risk_id=cla.risk_id
+left join risk.tmp_newcust_flag tnf on cwt.oid=tnf.trade_id
+left join aldb.t_payment_repay_txn prt on cwt.oid=prt.trade_id and prt.state = 110 and prt.created_at<=DATE_FORMAT(crp.final_repayment_date,'%Y-%m-%d 23:59:59')
+where ovr.total_overdue_period>0 and crp.`status` in (20,22,25) and cwt.txn_status in (20,22,25)
+and cwt.product_id=2 and crp.product_id=2 and app.apply_status=25 and tnf.newcust_flag=1
+and cla.apply_status=25 and crp.final_repayment_date<='2017-07-31 23:59:59'
+group by crp.customer_id,crp.txn_id
+;
+
+/* lcc 例
+select 
+left(a.dLstUpdDate,7) as 月份
+,r.credit_rating
+,count(if(a.aContactPhone=c.mobile_no and a.aPhoneCode in ('ALPA','KNOW','LEFD','LEHM','INSY','LECO','LESX') 
+and a.dLstUpdDate BETWEEN date_add(r.final_repayment_date,interval 1 day) and date_add(r.final_repayment_date,interval 1 month),a.aPhoneCode,null)) as 本人接通量
+,count(if(a.aContactPhone=c.mobile_no and a.dLstUpdDate BETWEEN date_add(r.final_repayment_date,interval 1 day) and date_add(r.final_repayment_date,interval 1 month),a.aPhoneCode,null)) as 本人电话量
+,count(if(a.aContactPhone<>c.mobile_no and a.aPhoneCode in ('ALPA','KNOW','LEFD','LEHM','INSY','LECO','LESX')
+and a.dLstUpdDate BETWEEN date_add(r.final_repayment_date,interval 1 day) and date_add(r.final_repayment_date,interval 1 month),a.aPhoneCode,null)) as 三方接通量
+,count(if(a.aContactPhone<>c.mobile_no and a.dLstUpdDate BETWEEN date_add(r.final_repayment_date,interval 1 day) and date_add(r.final_repayment_date,interval 1 month),a.aPhoneCode,null)) as 三方电话量
+from risktmp.lcc_170912_rank r 
+left join vulture.tbl_urge_case b on r.customer_id=b.aCustNo
+left join aldb.t_cust_customer c on b.aCustNo=c.oid
+left join vulture.tbl_urge_diallog a on b.aCaseId=a.aCaseId
+where a.aLstUpdOperator!='IVR' and a.dLstUpdDate BETWEEN '2017-01-01' and '2017-08-31'
+group by left(a.dLstUpdDate,7),r.credit_rating
+;
+*/
+-- My  
+-- 按接通率全量排序 展示值为进入M2比例
+-- 等宽等高切割 order by 接通率  1.切数量 2.切值
+-- 首次逾期M1阶段的人 
+insert into lxq_first_M1 (customer_id,txn_id,final_repayment_date,ovd_m2)	
+select customer_id,txn_id,DATE_FORMAT(final_repayment_date,'%Y-%m-%d') as final_repayment_date,max(ovd_m2) as ovd_m2   -- 进入M2tag
+	from risktmp.lcc_170830_android_customer 
+	group by customer_id having min(loan_time)
+;
+
+/* 版本1
+-- M1阶段的接通率
+-- DROP TABLE lxq_vulture_jietong;
+CREATE TABLE lxq_vulture_jietong
+select 
+left(DATE_FORMAT(final_repayment_date,'%Y-%m-%d'),7) as final_repayment_date
+,r.customer_id
+,r.ovd_m2
+,count(if(a.aContactPhone=c.mobile_no and a.aPhoneCode in ('ALPA','KNOW','LEFD','LEHM','INSY','LECO','LESX') 
+and a.dLstUpdDate BETWEEN date_add(r.final_repayment_date,interval 1 day) and date_add(r.final_repayment_date,interval 1 month),a.aPhoneCode,null)) as 本人接通量
+,count(if(a.aContactPhone=c.mobile_no and a.dLstUpdDate BETWEEN date_add(r.final_repayment_date,interval 1 day) and date_add(r.final_repayment_date,interval 1 month),a.aPhoneCode,null)) as 本人电话量
+,count(if(a.aContactPhone<>c.mobile_no and a.aPhoneCode in ('ALPA','KNOW','LEFD','LEHM','INSY','LECO','LESX')
+and a.dLstUpdDate BETWEEN date_add(r.final_repayment_date,interval 1 day) and date_add(r.final_repayment_date,interval 1 month),a.aPhoneCode,null)) as 三方接通量
+,count(if(a.aContactPhone<>c.mobile_no and a.dLstUpdDate BETWEEN date_add(r.final_repayment_date,interval 1 day) and date_add(r.final_repayment_date,interval 1 month),a.aPhoneCode,null)) as 三方电话量
+,'0' as `等量tag`
+,'0' as `等值tag`
+from lxq_first_M1 r
+left join vulture.tbl_urge_case b on r.customer_id=b.aCustNo
+left join aldb.t_cust_customer c on b.aCustNo=c.oid
+left join vulture.tbl_urge_diallog a on b.aCaseId=a.aCaseId
+where a.aLstUpdOperator!='IVR' and a.dLstUpdDate BETWEEN '2017-01-01' and '2017-08-31'
+group by left(DATE_FORMAT(final_repayment_date,'%Y-%m-%d'),7),r.customer_id,r.ovd_m2
+;
+
+-- 按三方接通量排序等值等量切分
+-- TRUNCATE TABLE lxq_tmp_vulture;
+CREATE TABLE lxq_tmp_vulture
+select 
+final_repayment_date,customer_id,ovd_m2,`本人接通量`,`本人电话量`,if(`本人接通量`=0,0,`本人接通量`*100/`本人电话量`) as `本人接通率`,`三方接通量`,`三方电话量`,if(`三方接通量`=0,0,`三方接通量`*100/`三方电话量`) as `三方接通率`,`等量tag`,`等值tag`
+from lxq_vulture_jietong
+order by `三方接通量`/`三方电话量`
+;
+
+alter table lxq_tmp_vulture add id int auto_increment  primary key;
+
+select `三方接通率`,count(id) from lxq_tmp_vulture
+group by `三方接通率`
+
+	select max(id),min(id),floor((max(id)-min(id))/10) num from lxq_tmp_vulture where `三方接通率`<>0;
+	select max(三方接通率),min(三方接通率),floor((max(三方接通率)-min(三方接通率))/10) num from lxq_tmp_vulture where `三方接通率`<>0;
+
+	update lxq_tmp_vulture set `等量tag`= if(`三方接通率`=0,0,if(ceil((id-72815)/6225)>10,10,ceil((id-72815)/6225))) ;
+	update lxq_tmp_vulture set `等值tag`= if(ceil(`三方接通率`/9)>10,10,ceil(`三方接通率`/9)) where `三方接通率`<>0;
+	
+	select 等量tag,count(*) from lxq_tmp_vulture group by 等量tag
+
+select * from lxq_tmp_vulture;
+*/
+
+-- 更新 20171018
+-- -- 首次进入M1阶段的人,进m1-2,进m2  lcc_170830_android_customer
+
+
+-- select * from lxq_customer where final_repayment_date>='2017-10-23 00:00:00';
+delete from lxq_customer where final_repayment_date>=DATE_FORMAT(DATE_SUB(curdate(),INTERVAL 2 MONTH),'%Y-%m-%d 00:00:00');
+insert into lxq_customer (customer_id	,
+txn_id	,
+apply_time	,
+loan_time	,
+loan_period	,
+apply_loan_days	,
+final_repayment_date	,
+principal_amt	,
+credit_score	,
+credit_rating	,
+loan_time_limit	,
+vari0002	,
+vari0155	,
+vari0156	,
+vari0157	,
+vari0158	,
+vari0159	,
+vari0362	,
+vari0363	,
+same_card	,
+magic_flag	,
+pay_fail	,
+change_os	,
+ovd_m12	,
+ovd_m2	
+)
+select crp.customer_id,crp.txn_id,app.updated_at as apply_time,cwt.loan_time
+,if(left(mid(cwt.loan_time,12,2),1)=0,right(mid(cwt.loan_time,12,2),1),mid(cwt.loan_time,12,2)) as loan_period
+,datediff(cwt.loan_time,app.updated_at) as apply_loan_days,crp.final_repayment_date
+,crp.principal_amt,ifnull(app.credit_score,0) as credit_score,ifnull(app.credit_rating,0) as credit_rating
+,cwt.loan_time_limit,a.vari0002,a.vari0155,a.vari0156,a.vari0157,a.vari0158,a.vari0159
+,a.vari0362,a.vari0363,if(cwt.bank_card_id=cla.bank_card_id,1,0) as same_card
+,if(crp.magicoin_deduction_amt>0,1,0) as magic_flag
+,count(distinct prt.created_at) as pay_fail
+,if(max(if(tre.event_type='applyCredit' and app.risk_id=tre.oid,tre.client_type,null))=max(if(tre.event_type='loan' and cwa.risk_id=tre.oid,tre.client_type,null)),0,1) as change_os
+,if(ovr.risk_control_level>=20,1,if(ovr.risk_control_level>=12,1,0)) as ovd_m12
+,if(ovr.risk_control_level>=20,1,0) as ovd_m2
+from risk.customer_vars_android a
+left join aldb.t_cash_withdraw_txn cwt on a.customer_id=cwt.customer_id
+left join risk.risk_daily_temp_app app on a.customer_id=app.customer_id
+left join aldb.t_cash_repay_plan crp on cwt.oid=crp.txn_id
+left join aldb.t_overdue_record ovr on cwt.oid=ovr.withdraw_cash_no
+left join aldb.t_cash_withdraw_apply cwa on cwt.withdraw_apply_id = cwa.oid
+left join aldb.t_risk_evaluation tre on a.customer_id=tre.customer_id
+left join aldb.t_cash_loan_apply cla on app.risk_id=cla.risk_id
+left join risk.tmp_newcust_flag tnf on cwt.oid=tnf.trade_id
+left join aldb.t_payment_repay_txn prt on cwt.oid=prt.trade_id and prt.state = 110 and prt.created_at<=DATE_FORMAT(crp.final_repayment_date,'%Y-%m-%d 23:59:59')
+where ovr.total_overdue_period>0 and crp.`status` in (20,22,25) and cwt.txn_status in (20,22,25)
+and cwt.product_id=2 and crp.product_id=2 and app.apply_status=25 and tnf.newcust_flag=1
+and cla.apply_status=25 and crp.final_repayment_date >=DATE_FORMAT(DATE_SUB(curdate(),INTERVAL 2 MONTH),'%Y-%m-%d 00:00:00')
+group by crp.customer_id,crp.txn_id
+;
+
+
+
+delete from lxq_urge_diallog where dLstUpdDate >='2017-10-18';
+insert into lxq_urge_diallog(aCaseId,aContactPhone,dLstUpdDate,aPhoneCode)
+select 
+aCaseId,aContactPhone,dLstUpdDate,
+case when aPhoneCode in ('ALPA','KNOW','LEFD','LEHM','INSY','LECO','LESX') then '1' else '0' end as aPhoneCode
+from vulture.tbl_urge_diallog  
+where aLstUpdOperator!='IVR' and dLstUpdDate BETWEEN '2017-10-18' and '2017-10-29'
+;
+
+
+
+insert into lxq_urge_case(r.final_repayment_date,r.customer_id 	
+,r.ovd_m12,r.ovd_m2,b.aCaseId) 
+select 
+r.final_repayment_date
+,r.customer_id
+,r.ovd_m12 
+,r.ovd_m2
+,b.aCaseId
+from lxq_customer_m r
+left join vulture.tbl_urge_case b on r.customer_id=b.aCustNo
+left join lxq_urge_case c on r.customer_id=c.customer_id
+where c.customer_id is null
+;
+
+
+DELETE FROM lxq_vulture_jietong where final_repayment_date>= DATE_FORMAT(DATE_SUB(curdate(),INTERVAL 2 MONTH),'%Y-%m-%d 00:00:00');
+INSERT into lxq_vulture_jietong(lxq_vulture_jietong,customer_id,ovd_m12,ovd_m2,三方接通量_m12,三方电话量_m12,三方接通量_m2,三方电话量_m2,等量tag,等值tag)
+select 
+left(DATE_FORMAT(r.final_repayment_date,'%Y-%m-%d'),7) as final_repayment_date
+,r.customer_id
+,r.ovd_m12
+,r.ovd_m2
+,count(if(a.aContactPhone<>c.mobile_no and a.aPhoneCode =1
+and a.dLstUpdDate BETWEEN date_add(r.final_repayment_date,interval 1 day) and date_add(r.final_repayment_date,interval 14 day),a.aPhoneCode,null)) as 三方接通量_m12		
+,count(if(a.aContactPhone<>c.mobile_no and a.dLstUpdDate BETWEEN date_add(r.final_repayment_date,interval 1 day) and date_add(r.final_repayment_date,interval 14 day),a.aPhoneCode,null)) as 三方电话量_m12
+,count(if(a.aContactPhone<>c.mobile_no and a.aPhoneCode =1
+and a.dLstUpdDate BETWEEN date_add(r.final_repayment_date,interval 1 day) and date_add(r.final_repayment_date,interval 2 month),a.aPhoneCode,null)) as 三方接通量_m2   
+,count(if(a.aContactPhone<>c.mobile_no and a.dLstUpdDate BETWEEN date_add(r.final_repayment_date,interval 1 day) and date_add(r.final_repayment_date,interval 2 month),a.aPhoneCode,null)) as 三方电话量_m2
+,'0' as `m12等量tag`
+,'0' as `m12等值tag`
+,'0' as `m2等量tag`
+,'0' as `m2等值tag`
+from lxq_urge_case r
+left join aldb.t_cust_customer c on r.customer_id=c.oid
+left join lxq_urge_diallog a on r.aCaseId=a.aCaseId
+where final_repayment_date>= DATE_FORMAT(DATE_SUB(curdate(),INTERVAL 2 MONTH),'%Y-%m-%d 00:00:00')
+group by left(DATE_FORMAT(final_repayment_date,'%Y-%m-%d'),7),r.customer_id,r.ovd_m12,r.ovd_m2
+;
+
+CREATE table lxq_tmp_jietong
+select 
+final_repayment_date,customer_id,ovd_m12,ovd_m2,
+`三方接通量_m12`,`三方电话量_m12`,if(`三方接通量_m12`=0,0,`三方接通量_m12`*100/`三方电话量_m12`) as `三方接通率_m12`,
+`三方接通量_m2`,`三方电话量_m2`,if(`三方接通量_m2`=0,0,`三方接通量_m2`*100/`三方电话量_m2`) as `三方接通率_m2`,
+`等量tag`,`等值tag`
+from lxq_vulture_jietong
+where final_repayment_date>='2017-01'
+order by `三方接通量_m2`/`三方电话量_m2`
+;
+
+	alter table lxq_tmp_jietong add id int auto_increment  primary key;
+
+	select max(id),min(id),floor((max(id)-min(id))/10) num from lxq_tmp_jietong where `三方接通率_m2`<>0;
+	select max(三方接通率_m2),min(三方接通率_m2),floor((max(三方接通率_m2)-min(三方接通率_m2))/10) num from lxq_tmp_jietong where `三方接通率_m2` not in (0,100);
+
+	update lxq_tmp_jietong set `m2等量tag`= if(`三方接通率_m2`=0,0,if(ceil((id-76399)/12123)>10,10,ceil((id-76399)/12123))) ;
+	update lxq_tmp_jietong set `m2等值tag`= if(ceil(`三方接通率_m2`/9)>10,10,ceil(`三方接通率_m2`/9)) where `三方接通率_m2`<>0;
+	
+	select m2等量tag,count(*) from lxq_tmp_jietong group by m2等量tag;
+	select m2等值tag,count(*) from lxq_tmp_jietong group by m2等值tag;
+
+
+CREATE table lxq_vulture_ratio
+select 
+*
+from lxq_tmp_jietong
+ORDER by 三方接通率_m12
+;
+
+	alter table lxq_vulture_ratio add id int auto_increment  primary key;
+
+	select max(id),min(id),floor((max(id)-min(id))/10) num from lxq_vulture_ratio where `三方接通率_m12`<>0;
+	select max(三方接通率_m12),min(三方接通率_m12),floor((max(三方接通率_m12)-min(三方接通率_m12))/10) num from lxq_vulture_ratio where `三方接通率_m12` not in (0,100);
+
+	update lxq_vulture_ratio set `m12等量tag`= if(`三方接通率_m12`=0,0,if(ceil((id-99761)/9787)>10,10,ceil((id-99761)/9787))) ;
+	update lxq_vulture_ratio set `m12等值tag`= if(ceil(`三方接通率_m12`/9)>10,10,ceil(`三方接通率_m12`/9)) where `三方接通率_m12`<>0;
+	
+	select m12等量tag,count(*) from lxq_vulture_ratio group by m12等量tag;
+	select m12等值tag,count(*) from lxq_vulture_ratio group by m12等值tag;
+	select m2等量tag,count(*) from lxq_vulture_ratio group by m2等量tag;
+	select m2等值tag,count(*) from lxq_vulture_ratio group by m2等值tag;
+
+
+
+
+-- =========================================================================================================================================================================================
+-- 每月1-2次，更新梯队名单
+TRUNCATE table risktmp.lxq_inside_urgeteam_info;
+insert into risktmp.lxq_inside_urgeteam_info VALUES('"&工号&"','"&组别&"','"&姓名&"');
+
+select * from inside_urgeteam_info a
+where a.`工号` in (select distinct `工号` from risktmp.lxq_inside_urgeteam_info b)
+
+
+-- select * from inside_urgeteam_info where `工号` ='CCA0369'  #not in (select `工号` from risktmp.lxq_inside_urgeteam_info  )
+
+insert into inside_urgeteam_info
+select `工号`,`组别` from risktmp.lxq_inside_urgeteam_info
+where `工号` not in (select `工号` from inside_urgeteam_info)
+
+
+-- TRUNCATE table inside_customer_callcount_casecount_m3
+insert into inside_customer_callcount_casecount_m3
+select `工号`,`姓名` from risktmp.lxq_inside_urgeteam_info where `组别`='M3';
+
+
+
+-- =========================================================================================================================================================================================
+-- 逾期回收率
+-- 本金滚动率 
+-- 		M1_1 本金滚动率:入催率
+-- 		M1_2~4 本金滚动率: 迁徙率
+
+
+
+
+
+
+-- =========================================================================================================================================================================================
+-- cycle回收率监控样本
+select 
+report_date,overdue_date,overdue_level,
+if(overdue_level='M2',0,prev_principal) as 前一日到期本金,
+if(overdue_level='M2',0,overdue_principal) as 入催本金,
+if(overdue_level='M2',0,overdue_principal + overdue_service_fee) as 入催应还总额,
+ifnull(rec_principal,0) as 回收本金,
+ifnull(rec_principal,0)+ifnull(rec_service_fee,0) as 回收应还总额
+from tmp_coll_report where report_date>='2017-07-01' and overdue_date>='2017-07-01' and overdue_level in ('M1','M2')
+
+
+-- ===================================
+-- 动态评级
+from aldb.t_cash_withdraw_txn cwt
+left join aldb.t_cash_withdraw_apply cwa on cwt.withdraw_apply_id=cwa.oid 
+-- 初始评级
+credit_rating
+risk.risk_daily_temp_app
+apply_status =25
+
+
+
+
+-- ============================================================================================================================================================================
+-- ovr14 非ovr.total_overdue_period 逾期天数，而是从到期日至实际还款日（部分还款可暂不入灰名单）
+-- 判断逾期多少天进入灰名单   表头：customer_id、min(ovr_day)、ovr14
+-- 范围: 1. 8月至今授信  2. 老客户   
+-- 条件(loan借款日期):  1. 已到期且还款   final_date~+14天
+-- 		 				2. 已到期且未还款 & >final_date+14天     
+--						3. 如一天借多笔算一笔, 一月多天算多笔；取已全部还清的客户实际还款日
+--						4. X轴（时间差） group by customer_id 取min(每笔最后还款日-实际还款日) (提前1天赋值-1、逾期1天赋值1、999为未还&到期已还>14天)
+--						5. Y轴（逾期率）距现最近一笔借款 是否逾期>14天 AVG(ovr14=1/0)
+
+-- 老客
+CREATE table lxq_tnf
+select distinct customer_id from risk.tmp_newcust_flag where newcust_flag=0 ;
+-- 样本 customer_id、借款日期、最后还款日、实际还款日、ovr_day
+drop table if EXISTS lxq_test;
+create table lxq_test
+select 
+crp.customer_id
+,DATE_FORMAT(cwt.loan_time,'%Y-%m-%d') as 借款日期
+,max(DATE_FORMAT(crp.final_repayment_date,'%Y-%m-%d')) as 最后还款日
+,max(DATE_FORMAT(rdr.repayment_time,'%Y-%m-%d')) as 实际还款日
+,min(if(rdr.repayment_time is null,datediff(CURDATE(),crp.final_repayment_date),datediff(rdr.repayment_time,crp.final_repayment_date))) as difference
+from aldb.t_cash_repay_plan crp
+left join aldb.company_test_users ctu on crp.customer_id=ctu.oid
+left join aldb.t_overdue_record ovr on crp.customer_sub_account_id=ovr.customer_sub_account_id
+left join risk.risk_daily_repayment rdr on crp.customer_sub_account_id=rdr.account_id and rdr.balance_type='principal'
+left join risk.risk_daily_temp_app app on crp.customer_id=app.customer_id
+left join lxq_tnf tnf on crp.customer_id=tnf.customer_id
+left join aldb.t_cash_withdraw_txn cwt on crp.txn_id=cwt.oid
+where cwt.product_id=2 and crp.product_id=2 
+and crp.`status` in (20,25) and cwt.txn_status in (20,25)
+and ctu.oid is null and tnf.customer_id is not null
+and app.updated_at BETWEEN '2017-08-01 00:00:00' and '2017-11-30 23:59:59' and app.apply_status=25 
+and DATE_FORMAT(crp.final_repayment_date,'%Y-%m-%d')<='2017-12-01 23:59:59'
+group by 借款日期,customer_id
+;
+
+ALTER TABLE `lxq_test` ADD INDEX cust_idx ( `customer_id` );
+
+drop table if EXISTS lxq_test1;
+create table lxq_test1
+select 
+t1.customer_id,date_sub(t2.最后还款日,INTERVAL WEEKDAY(t2.最后还款日) DAY) as 最后还款周,
+if(t1.difference>14,999,t1.difference) as difference,
+if(t2.difference>14,1,0) as ovr14
+from (
+	select 
+	a.customer_id,
+	min(a.difference) as difference
+	from lxq_test a 
+	group by customer_id
+) t1 
+left join (
+	select 
+	b.customer_id,b.最后还款日,
+	a.difference
+	from lxq_test a 
+	left join (
+		select customer_id,
+		max(最后还款日) as 最后还款日,
+		max(借款日期) as 借款日期 from lxq_test 
+		group by customer_id
+	)b on a.customer_id=b.customer_id and a.借款日期=b.借款日期
+	where b.customer_id is not null
+)t2 on t1.customer_id=t2.customer_id
+;
+
+--校验 入催2周后未催回率
+create TEMPORARY table lxq_tmp1
+select ypcn.overdue_WEEK as WEEK,ypcn.overdue_yrmth as yrmth,newcust_flag,ypcn.product_terminal,
+ypcn.credit_rating as initial_rating,
+sum(ypcn.withdraw_amt) as 应还本金
+FROM risk.yq_payday_cwt_new ypcn
+left join risk.risk_daily_temp_app app on ypcn.customer_id=app.customer_id
+WHERE ypcn.final_repayment_date<DATE_FORMAT(subdate(curdate(),WEEKDAY(curdate())),'%Y-%m-%d')
+and app.updated_at BETWEEN '2017-08-01 00:00:00' and '2017-11-30 23:59:59' and app.apply_status=25 
+and ypcn.overdue_WEEK<date_sub(DATE_FORMAT(subdate(curdate(),WEEKDAY(curdate())),'%Y-%m-%d'),INTERVAL 20 day)
+group by ypcn.overdue_WEEK,newcust_flag,ypcn.product_terminal,ypcn.credit_rating
+;
+
+create TEMPORARY table lxq_tmp2
+select ypcn.overdue_WEEK as WEEK,ypcn.overdue_yrmth as yrmth,newcust_flag,ypcn.product_terminal,
+ypcn.credit_rating as initial_rating,
+sum(IFNULL(rdr.write_off_amt,0)) as 已还本金
+FROM risk.yq_payday_cwt_new ypcn
+left join risk.risk_daily_temp_app app on ypcn.customer_id=app.customer_id
+left JOIN risk.wpd_cash_loans_rdr1 rdr ON ypcn.oid =rdr.trade_id and rdr.repayment_time<date_format(date_add(ypcn.final_repayment_date,interval 15 day),'%Y-%m-%d 00:00:00')
+WHERE ypcn.final_repayment_date<DATE_FORMAT(subdate(curdate(),WEEKDAY(curdate())),'%Y-%m-%d')
+and app.updated_at BETWEEN '2017-08-01 00:00:00' and '2017-11-30 23:59:59' and app.apply_status=25 
+and ypcn.overdue_WEEK<date_sub(DATE_FORMAT(subdate(curdate(),WEEKDAY(curdate())),'%Y-%m-%d'),INTERVAL 20 day)
+group by ypcn.overdue_WEEK,newcust_flag,ypcn.product_terminal,ypcn.credit_rating
+;
+
+create table if not exists wpd2_unpaid_pct_by_os
+select a.yrmth,a.WEEK,a.newcust_flag,a.product_terminal,
+(sum(应还本金)-sum(已还本金))/sum(应还本金) as 未催回率,sum(应还本金) as 应还本金
+from lxq_tmp1 a
+left join lxq_tmp2 b on a.WEEK=b.WEEK and a.newcust_flag=b.newcust_flag and a.product_terminal=b.product_terminal
+group by a.WEEK,a.newcust_flag,a.product_terminal;
+
+
+--============================================================================================================================================================================
+-- ptp promise to pay的客户逾期情况
+drop table lxq_test;
+create table lxq_test
+select 
+crp.customer_id
+,aa.reportdate
+,DATE_FORMAT(cwt.loan_time,'%Y-%m-%d') as 借款日期
+,DATE_FORMAT(crp.final_repayment_date,'%Y-%m-%d') as 最后还款日
+,DATE_FORMAT(rdr.repayment_time,'%Y-%m-%d') as 实际还款日
+from aldb.t_cash_repay_plan crp
+left join aldb.company_test_users ctu on crp.customer_id=ctu.oid
+left join aldb.t_overdue_record ovr on crp.customer_sub_account_id=ovr.customer_sub_account_id
+left join risk.risk_daily_repayment rdr on crp.customer_sub_account_id=rdr.account_id and rdr.balance_type='principal'
+left join aldb.t_cash_withdraw_txn cwt on crp.txn_id=cwt.oid
+inner join risktmp.lxq_inside_urgeteam_info aa on crp.customer_id=aa.custid
+where cwt.product_id=2 and crp.product_id=2 
+and crp.`status` in (20,25) and cwt.txn_status in (20,25)
+and ctu.oid is null 
+and DATE_FORMAT(crp.final_repayment_date,'%Y-%m-%d') between '2017-11-30' and '2017-12-08'
+-- and crp.customer_id in (select custid from risktmp.lxq_inside_urgeteam_info)
+;
+
+select * from lxq_test;
+select 
+reportdate,(1-count(实际还款日)/count(借款日期)) as 逾期数
+from lxq_test
+group by reportdate
+;
+
+
+
+-- ============================================================================================================================================================================
+-- 动态评级<=9 and 逾期4-29天 的新网客户在逾期总客数中的占比 看影响
+-- ovr.total_overdue_period BETWEEN 4 and 29  逾期至全部还清的总天数
+
+select 
+T.final_repayment_date,
+总客户数,
+逾期4至29天客户数,
+concat(round(逾期4至29天客户数*100/总客户数,2),'%') as 新网占比
+from 
+(
+	select 
+	DATE_FORMAT(crp.final_repayment_date,'%Y-%m-%d') final_repayment_date,count(distinct crp.customer_id) 总客户数
+	from aldb.t_cash_repay_plan crp
+	left join aldb.company_test_users ctu on crp.customer_id=ctu.oid
+	where crp.`status` in (20,22,25) -- ovr.total_overdue_period>0 and 
+	and ctu.oid is null 
+	and crp.final_repayment_date between '2017-12-01 00:00:00' and '2017-12-20 23:59:59'
+	group by DATE_FORMAT(crp.final_repayment_date,'%Y-%m-%d')
+)T
+inner join(
+	select 
+	count(distinct crp.customer_id) 逾期4至29天客户数
+	,DATE_FORMAT(crp.final_repayment_date,'%Y-%m-%d') as 最后还款日
+	from aldb.t_cash_repay_plan crp
+	inner join aldb.t_finance_loan_record xw on crp.txn_id=xw.txn_id
+	left join aldb.company_test_users ctu on crp.customer_id=ctu.oid
+	left join aldb.t_overdue_record ovr on crp.customer_sub_account_id=ovr.customer_sub_account_id
+	left join risk.risk_daily_repayment rdr on crp.customer_sub_account_id=rdr.account_id and rdr.balance_type='principal'
+	left join aldb.t_cash_withdraw_txn cwt on crp.txn_id=cwt.oid
+	left join aldb.t_cash_withdraw_apply cwa on cwt.withdraw_apply_id=cwa.oid 
+	where ovr.total_overdue_period BETWEEN 4 and 29
+	and crp.`status` in (20,22,25) and cwt.txn_status in (20,22,25)
+	and ctu.oid is null and cwa.credit_grade<=9	
+	and fund_code = 'xinwangbank'
+	and crp.final_repayment_date <= '2017-12-20 23:59:59'
+	and cwt.product_id=2 and crp.product_id=2 
+	group by DATE_FORMAT(crp.final_repayment_date,'%Y-%m-%d')
+)lxq on lxq.最后还款日=T.final_repayment_date
+;
+
+
